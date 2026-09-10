@@ -9,50 +9,59 @@ define('PROXY_TIMEOUT', 30);
 define('CONNECT_TIMEOUT', 10);
 
 $path = $_GET['__path'] ?? '/';
-$queryParams = $_GET;
-unset($queryParams['__path']);
-$debug = isset($queryParams['__debug']);
-unset($queryParams['__debug']);
+$qp = $_GET;
+unset($qp['__path']);
+$debug = isset($qp['__debug']);
+unset($qp['__debug']);
 
 $method = $_SERVER['REQUEST_METHOD'];
-$requestBody = '';
+$reqBody = '';
 if ($method !== 'GET' && $method !== 'HEAD') {
-    $requestBody = file_get_contents('php://input') ?: '';
+    $reqBody = file_get_contents('php://input') ?: '';
 }
 
-// Заголовки с акцентом на Happ
-$headers = [
-    'X-Forwarded-Proto: https',
-    'X-Forwarded-Host: ' . ($_SERVER['HTTP_HOST'] ?? 'localhost'),
-    'X-Real-IP: ' . ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'),
-    'X-Forwarded-For: ' . ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'),
-    'Accept: text/plain, application/json, text/yaml, */*', // Happ принимает что угодно
-    'User-Agent: ' . ($_SERVER['HTTP_USER_AGENT'] ?? 'Happ/2.0.0'),
-];
-if (isset($_SERVER['HTTP_AUTHORIZATION'])) $headers[] = 'Authorization: ' . $_SERVER['HTTP_AUTHORIZATION'];
+$inUA = $_SERVER['HTTP_USER_AGENT'] ?? '';
+$isBrowser = (stripos($inUA, 'Mozilla') !== false);
 
-// Все возможные форматы подписки
-$candidates = [];
-$qs = http_build_query($queryParams);
-$candidates[] = $path . ($qs ? '?' . $qs : '');
-
-if (preg_match('#^/sub/?$#i', $path) && isset($queryParams['id'])) {
-    $id = $queryParams['id'];
-    $rest = $queryParams; unset($rest['id']);
-    $restQs = http_build_query($rest);
-    $candidates[] = '/sub/' . $id;
-    $candidates[] = '/sub/' . $id . '/';
-    $candidates[] = '/sub/' . $id . ($restQs ? '?' . $restQs : '');
-    $candidates[] = '/sub/' . $id . '/' . ($restQs ? '?' . $restQs : '');
-    $candidates[] = '/api/sub/' . $id;
-    $candidates[] = '/api/sub?id=' . $id;
+// ---- Кандидаты URI ----
+$qs = http_build_query($qp);
+$cands = [$path . ($qs ? '?' . $qs : '')];
+if (isset($qp['id'])) {
+    $cands[] = '/sub/' . $qp['id'];
+    $cands[] = '/sub/' . $qp['id'] . '/';
 }
-$candidates = array_values(array_unique($candidates));
+$cands = array_values(array_unique($cands));
 
-function proxyRequest($scheme, $uri, $headers, $method, $requestBody) {
+// ---- Кандидаты User-Agent (VPN-клиенты) ----
+$uas = [];
+if (!$isBrowser && $inUA !== '') $uas[] = $inUA; // настоящий UA от Happ
+$uas = array_merge($uas, [
+    'Happ/2.6.0',
+    'v2rayNG/1.9.6',
+    'ClashforWindows/0.20.39',
+    'sing-box/1.9.5',
+    'Shadowrocket/1800',
+]);
+if ($isBrowser) $uas[] = $inUA;
+$uas = array_values(array_unique(array_filter($uas)));
+
+function makeHeaders($ua) {
+    $h = [
+        'X-Forwarded-Proto: https',
+        'X-Forwarded-Host: ' . ($_SERVER['HTTP_HOST'] ?? 'localhost'),
+        'X-Real-IP: ' . ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'),
+        'X-Forwarded-For: ' . ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'),
+        'Accept: */*',
+        'User-Agent: ' . $ua,
+    ];
+    if (isset($_SERVER['HTTP_AUTHORIZATION'])) $h[] = 'Authorization: ' . $_SERVER['HTTP_AUTHORIZATION'];
+    return $h;
+}
+
+function proxyRequest($uri, $headers, $method, $reqBody) {
     $ch = curl_init();
     curl_setopt_array($ch, [
-        CURLOPT_URL            => $scheme . BACKEND_HOST . $uri,
+        CURLOPT_URL            => 'http://' . BACKEND_HOST . $uri,
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_FOLLOWLOCATION => false,
         CURLOPT_TIMEOUT        => PROXY_TIMEOUT,
@@ -64,74 +73,84 @@ function proxyRequest($scheme, $uri, $headers, $method, $requestBody) {
     ]);
     if ($method !== 'GET' && $method !== 'HEAD') {
         curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
-        if ($requestBody !== '') curl_setopt($ch, CURLOPT_POSTFIELDS, $requestBody);
+        if ($reqBody !== '') curl_setopt($ch, CURLOPT_POSTFIELDS, $reqBody);
     }
     $response = curl_exec($ch);
-    $result = [
-        'errno' => curl_errno($ch),
-        'error' => curl_error($ch),
+    $r = [
+        'errno'      => curl_errno($ch),
+        'error'      => curl_error($ch),
         'headerSize' => curl_getinfo($ch, CURLINFO_HEADER_SIZE),
-        'httpCode' => curl_getinfo($ch, CURLINFO_HTTP_CODE),
-        'response' => $response,
+        'httpCode'   => curl_getinfo($ch, CURLINFO_HTTP_CODE),
+        'response'   => $response,
     ];
     curl_close($ch);
-    return $result;
+    return $r;
 }
 
-function isSubscription($result) {
-    if ($result['errno'] !== 0 || $result['httpCode'] < 200 || $result['httpCode'] >= 400) return false;
-    $respHeaders = substr($result['response'], 0, $result['headerSize']);
-    if (preg_match('/^Content-Type:\s*text\/html/im', $respHeaders)) return false;
-    $body = substr($result['response'], $result['headerSize']);
-    $head = strtolower(ltrim(substr($body, 0, 200)));
+function isSubscription($r) {
+    if ($r['errno'] !== 0 || $r['httpCode'] < 200 || $r['httpCode'] >= 400) return false;
+    $h = substr($r['response'], 0, $r['headerSize']);
+    if (preg_match('/^Content-Type:\s*text\/html/im', $h)) return false;
+    $b = substr($r['response'], $r['headerSize']);
+    if ($b === '') return false;
+    $head = strtolower(ltrim(substr($b, 0, 200)));
     return !(strpos($head, '<!doctype') === 0 || strpos($head, '<html') === 0);
 }
 
+// ---- Перебор: URI × User-Agent ----
 $attempts = [];
 $final = null;
 $found = false;
 
-foreach ($candidates as $uri) {
-    foreach (['http://', 'https://'] as $scheme) {
-        $final = proxyRequest($scheme, $uri, $headers, $method, $requestBody);
+foreach ($cands as $uri) {
+    $lastCode = 0;
+    foreach ($uas as $ua) {
+        $final = proxyRequest($uri, makeHeaders($ua), $method, $reqBody);
         $ok = isSubscription($final);
-        $attempts[] = $scheme . BACKEND_HOST . $uri . ' => HTTP ' . $final['httpCode'] . ', errno ' . $final['errno'] . ($ok ? ' [ПОДПИСКА!]' : ' [HTML/ошибка]');
-        if ($final['errno'] === 0 && $final['httpCode'] > 0) {
-            if ($ok) $found = true;
-            break;
-        }
+        $attempts[] = $uri . ' | UA="' . $ua . '" => HTTP ' . $final['httpCode'] . ($ok ? '  [ПОДПИСКА!]' : '');
+        $lastCode = $final['httpCode'];
+        if ($final['errno'] !== 0) break 2;          // сеть мертва — стоп
+        if ($ok) { $found = true; break 2; }         // нашли конфиг
+        if ($lastCode === 404) break;                // путь не существует, UA не важен
     }
-    if ($found) break;
 }
 
 ob_end_clean();
 
+// ---- ДИАГНОСТИКА ----
 if ($debug) {
     header('Content-Type: text/plain; charset=utf-8');
-    echo "=== PROXY DEBUG ===\nMethod: {$method}\nUA: " . ($_SERVER['HTTP_USER_AGENT'] ?? '-') . "\n\n";
+    echo "=== PROXY DEBUG ===\nMethod: {$method}\nIncoming UA: {$inUA}\n\n";
     echo "Attempts:\n" . implode("\n", $attempts) . "\n\n";
-    echo "Last response headers:\n" . substr($final['response'], 0, $final['headerSize']) . "\n";
-    echo "Last body (500 chars):\n" . substr($final['response'], $final['headerSize'], 500) . "\n";
+    echo "Last headers:\n" . substr($final['response'], 0, $final['headerSize']) . "\n";
+    $body = substr($final['response'], $final['headerSize']);
+    echo "Last body (800 chars):\n" . substr($body, 0, 800) . "\n";
+    // Если снова HTML — ищем внутри любые ссылки на подписку
+    if (preg_match('/^Content-Type:\s*text\/html/im', substr($final['response'], 0, $final['headerSize']))) {
+        preg_match_all('#["\'\(]([^"\'\s\)]*(?:sub|token|id=)[^"\'\s\)]*)["\'\)]#i', $body, $m);
+        $links = array_values(array_unique($m[1]));
+        echo "\nLinks found inside HTML:\n" . implode("\n", array_slice($links, 0, 25)) . "\n";
+    }
     exit;
 }
 
-if ($final['errno'] !== 0 || $final['httpCode'] === 0) {
+// ---- Ошибка сети ----
+if ($final === null || $final['errno'] !== 0 || $final['httpCode'] === 0) {
     http_response_code(502);
     header('Content-Type: text/plain; charset=utf-8');
-    echo 'Proxy Error: ' . $final['error'];
+    echo 'Proxy Error: ' . ($final['error'] ?? 'no response');
     exit;
 }
 
+// ---- Ответ клиенту ----
 $responseHeaders = substr($final['response'], 0, $final['headerSize']);
 $responseBody    = substr($final['response'], $final['headerSize']);
 
-$skipHeaders = ['transfer-encoding', 'connection', 'keep-alive', 'proxy-connection'];
-foreach (explode("\r\n", trim($responseHeaders)) as $headerLine) {
-    if ($headerLine === '' || strpos($headerLine, ':') === false) continue;
-    [$name] = explode(':', $headerLine, 2);
-    if (!in_array(strtolower(trim($name)), $skipHeaders, true)) {
-        header($headerLine);
-    }
+$skip = ['transfer-encoding', 'connection', 'keep-alive', 'proxy-connection'];
+foreach (explode("\r\n", trim($responseHeaders)) as $line) {
+    if ($line === '' || strpos($line, ':') === false) continue;
+    [$name] = explode(':', $line, 2);
+    if (!in_array(strtolower(trim($name)), $skip, true)) header($line);
 }
 
 header('Content-Length: ' . strlen($responseBody));
