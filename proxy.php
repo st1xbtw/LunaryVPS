@@ -4,21 +4,16 @@ ini_set('display_errors', '0');
 ini_set('log_errors', '1');
 ob_start();
 
-// ============ НАСТРОЙКИ ============
 define('BACKEND_HOST', 'node.ettacent.dev:25601');
 define('PROXY_TIMEOUT', 45);
 define('CONNECT_TIMEOUT', 10);
 
 // ============ ПОДГОТОВКА ============
 $path = $_GET['__path'] ?? '/';
-
 $queryParams = $_GET;
 unset($queryParams['__path']);
 $debug = isset($queryParams['__debug']);
 unset($queryParams['__debug']);
-$cleanQuery = http_build_query($queryParams);
-
-$uri = $path . ($cleanQuery ? '?' . $cleanQuery : '');
 
 $method = $_SERVER['REQUEST_METHOD'];
 $requestBody = '';
@@ -37,6 +32,22 @@ if (isset($_SERVER['HTTP_AUTHORIZATION'])) $headers[] = 'Authorization: ' . $_SE
 if (isset($_SERVER['HTTP_ACCEPT']))        $headers[] = 'Accept: ' . $_SERVER['HTTP_ACCEPT'];
 if (isset($_SERVER['HTTP_USER_AGENT']))    $headers[] = 'User-Agent: ' . $_SERVER['HTTP_USER_AGENT'];
 
+// ============ КАНДИДАТЫ URL (разные форматы подписки) ============
+$candidates = [];
+$qs = http_build_query($queryParams);
+$candidates[] = $path . ($qs ? '?' . $qs : '');
+
+// Если /sub?id=xxx — пробуем также /sub/xxx и /sub/xxx?остальные=параметры
+if (preg_match('#^/sub/?$#i', $path) && isset($queryParams['id'])) {
+    $id = $queryParams['id'];
+    $rest = $queryParams;
+    unset($rest['id']);
+    $restQs = http_build_query($rest);
+    $candidates[] = '/sub/' . rawurlencode($id) . ($restQs ? '?' . $restQs : '');
+    $candidates[] = '/sub/' . rawurlencode($id);
+}
+$candidates = array_values(array_unique($candidates));
+
 // ============ ФУНКЦИЯ ЗАПРОСА ============
 function proxyRequest($scheme, $uri, $headers, $method, $requestBody) {
     $ch = curl_init();
@@ -51,14 +62,12 @@ function proxyRequest($scheme, $uri, $headers, $method, $requestBody) {
         CURLOPT_SSL_VERIFYPEER => false,
         CURLOPT_SSL_VERIFYHOST => false,
     ]);
-
     if ($method !== 'GET' && $method !== 'HEAD') {
         curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
         if ($requestBody !== '') {
             curl_setopt($ch, CURLOPT_POSTFIELDS, $requestBody);
         }
     }
-
     $response = curl_exec($ch);
     $result = [
         'errno'      => curl_errno($ch),
@@ -71,32 +80,55 @@ function proxyRequest($scheme, $uri, $headers, $method, $requestBody) {
     return $result;
 }
 
-// ============ ПРОБУЕМ http, потом https ============
+// ============ ПРОВЕРКА: ПОХОЖЕ ЛИ НА ПОДПИСКУ (не HTML) ============
+function isSubscriptionLike($result) {
+    if ($result['errno'] !== 0 || $result['httpCode'] < 200 || $result['httpCode'] >= 400) {
+        return false;
+    }
+    $respHeaders = substr($result['response'], 0, $result['headerSize']);
+    if (preg_match('/^Content-Type:\s*text\/html/im', $respHeaders)) {
+        return false;
+    }
+    $body = substr($result['response'], $result['headerSize']);
+    $head = strtolower(ltrim(substr($body, 0, 200)));
+    if (strpos($head, '<!doctype') === 0 || strpos($head, '<html') === 0) {
+        return false;
+    }
+    return true;
+}
+
+// ============ ПЕРЕБОР КАНДИДАТОВ ============
 $attempts = [];
 $final = null;
+$found = false;
 
-foreach (['http://', 'https://'] as $scheme) {
-    $final = proxyRequest($scheme, $uri, $headers, $method, $requestBody);
-    $attempts[] = $scheme . ' => errno ' . $final['errno'] . ' (' . $final['error'] . '), HTTP ' . $final['httpCode'];
-    if ($final['errno'] === 0 && $final['httpCode'] > 0) {
-        break;
+foreach ($candidates as $uri) {
+    foreach (['http://', 'https://'] as $scheme) {
+        $final = proxyRequest($scheme, $uri, $headers, $method, $requestBody);
+        $ok = isSubscriptionLike($final);
+        $attempts[] = $scheme . $uri . ' => errno ' . $final['errno'] . ', HTTP ' . $final['httpCode'] . ($ok ? '  [ПОДПИСКА НАЙДЕНА]' : '  [не подписка]');
+
+        if ($final['errno'] === 0 && $final['httpCode'] > 0) {
+            if ($ok) $found = true;
+            break; // бэкенд ответил — протокол верный, схему не меняем
+        }
+        // errno != 0 → пробуем другую схему
     }
+    if ($found) break;
 }
 
 ob_end_clean();
 
-// ============ ДИАГНОСТИКА (&__debug=1) ============
+// ============ ДИАГНОСТИКА ============
 if ($debug) {
     header('Content-Type: text/plain; charset=utf-8');
-    echo "=== PROXY DEBUG ===\n";
-    echo "URI: {$uri}\nMethod: {$method}\n\n";
-    echo "Attempts:\n" . implode("\n", $attempts) . "\n\n";
+    echo "=== PROXY DEBUG ===\nMethod: {$method}\n\nAttempts:\n" . implode("\n", $attempts) . "\n\n";
     echo "Response headers:\n" . substr($final['response'], 0, $final['headerSize']) . "\n";
     echo "Body (first 500 chars):\n" . substr($final['response'], $final['headerSize'], 500) . "\n";
     exit;
 }
 
-// ============ ОШИБКА ============
+// ============ ОШИБКА СОЕДИНЕНИЯ ============
 if ($final['errno'] !== 0 || $final['httpCode'] === 0) {
     http_response_code(502);
     header('Content-Type: text/plain; charset=utf-8');
@@ -104,7 +136,7 @@ if ($final['errno'] !== 0 || $final['httpCode'] === 0) {
     exit;
 }
 
-// ============ ОТВЕТ ============
+// ============ ОТВЕТ КЛИЕНТУ ============
 $responseHeaders = substr($final['response'], 0, $final['headerSize']);
 $responseBody    = substr($final['response'], $final['headerSize']);
 
