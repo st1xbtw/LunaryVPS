@@ -1,53 +1,32 @@
 <?php
 /**
- * Роутер для Render.com (заменяет .htaccess)
+ * Роутер для Render.com (заменяет .htaccess — там Apache не работает)
  */
 
 $uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 
-// Редирект index.html → /
+// Редирект /index.html → /
 if (preg_match('#/index\.html$#i', $uri)) {
     $newUri = preg_replace('#/index\.html$#i', '/', $uri);
     header('Location: ' . $newUri, true, 301);
     exit;
 }
 
-// Проксирование /sub/* → proxy.php
-if (preg_match('#^/sub#i', $uri)) {
-    $_GET['__path'] = $uri;
-    // Пробрасываем остальные GET-параметры
+// Проксирование /sub, /dashboard, /api/dashboard → proxy.php
+if (preg_match('#^/(sub|dashboard|api/dashboard)#i', $uri)) {
     parse_str($_SERVER['QUERY_STRING'], $existingParams);
     $_GET = array_merge($existingParams, ['__path' => $uri]);
     require __DIR__ . '/proxy.php';
     exit;
 }
 
-// Проксирование /dashboard/* → proxy.php
-if (preg_match('#^/dashboard#i', $uri)) {
-    $_GET['__path'] = $uri;
-    parse_str($_SERVER['QUERY_STRING'], $existingParams);
-    $_GET = array_merge($existingParams, ['__path' => $uri]);
-    require __DIR__ . '/proxy.php';
-    exit;
-}
-
-// Проксирование /api/dashboard/* → proxy.php
-if (preg_match('#^/api/dashboard#i', $uri)) {
-    $_GET['__path'] = $uri;
-    parse_str($_SERVER['QUERY_STRING'], $existingParams);
-    $_GET = array_merge($existingParams, ['__path' => $uri]);
-    require __DIR__ . '/proxy.php';
-    exit;
-}
-
-// Статические файлы (index.html, 404.html, css, js и т.д.)
+// Статические файлы
 $filePath = __DIR__ . $uri;
 if ($uri === '/' || $uri === '') {
     $filePath = __DIR__ . '/index.html';
 }
 
 if (file_exists($filePath) && is_file($filePath)) {
-    // Определяем MIME-тип
     $ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
     $mimeTypes = [
         'html' => 'text/html',
@@ -69,11 +48,10 @@ if (file_exists($filePath) && is_file($filePath)) {
 }
 
 // 404
+http_response_code(404);
 if (file_exists(__DIR__ . '/404.html')) {
-    http_response_code(404);
     readfile(__DIR__ . '/404.html');
 } else {
-    http_response_code(404);
     echo '404 Not Found';
 }
 exit;
