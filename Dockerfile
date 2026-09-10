@@ -9,8 +9,7 @@ RUN apt-get update && apt-get install -y libcurl4-openssl-dev \
 WORKDIR /app
 COPY . .
 
-# Открываем порт (Render сам подставит нужный через $PORT)
 EXPOSE 10000
 
-# Запускаем встроенный PHP-сервер
+# Запускаем PHP-сервер на порту Render
 CMD ["sh", "-c", "php -S 0.0.0.0:${PORT:-10000} index.php"]
