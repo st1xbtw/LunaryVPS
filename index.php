@@ -1,14 +1,20 @@
 <?php
 /**
- * Роутер для Render.com (заменяет .htaccess — там Apache не работает)
+ * Роутер для Render.com
  */
 
 $uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 
+// Health-check для UptimeRobot и проверки живости
+if ($uri === '/healthz') {
+    header('Content-Type: text/plain; charset=utf-8');
+    echo 'OK ' . date('c');
+    exit;
+}
+
 // Редирект /index.html → /
 if (preg_match('#/index\.html$#i', $uri)) {
-    $newUri = preg_replace('#/index\.html$#i', '/', $uri);
-    header('Location: ' . $newUri, true, 301);
+    header('Location: ' . preg_replace('#/index\.html$#i', '/', $uri), true, 301);
     exit;
 }
 
@@ -29,16 +35,10 @@ if ($uri === '/' || $uri === '') {
 if (file_exists($filePath) && is_file($filePath)) {
     $ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
     $mimeTypes = [
-        'html' => 'text/html',
-        'css'  => 'text/css',
-        'js'   => 'application/javascript',
-        'json' => 'application/json',
-        'png'  => 'image/png',
-        'jpg'  => 'image/jpeg',
-        'jpeg' => 'image/jpeg',
-        'gif'  => 'image/gif',
-        'svg'  => 'image/svg+xml',
-        'ico'  => 'image/x-icon',
+        'html' => 'text/html', 'css' => 'text/css', 'js' => 'application/javascript',
+        'json' => 'application/json', 'png' => 'image/png', 'jpg' => 'image/jpeg',
+        'jpeg' => 'image/jpeg', 'gif' => 'image/gif', 'svg' => 'image/svg+xml',
+        'ico' => 'image/x-icon',
     ];
     if (isset($mimeTypes[$ext])) {
         header('Content-Type: ' . $mimeTypes[$ext]);
